@@ -275,7 +275,6 @@ elif method == "2nd-Order RSM":
 elif method == "Desirability Function":
     st.header("Desirability Function (Multi-Response Optimization)")
     st.markdown("Combine multiple responses into one overall desirability D.")
-    # Factor inputs
     col1, col2 = st.columns(2)
     with col1:
         factor_names = st.text_input("Factor names (comma separated)", "Temperature, Catalyst").split(",")
@@ -294,23 +293,34 @@ elif method == "Desirability Function":
         ])
     st.subheader("Response Specifications")
     st.markdown("Define each response: name, goal (maximize/minimize/target), low, high, target, weight, shape.")
-    # Let user add responses dynamically
+    
+    # Set initial number of responses to 3 to match default data
     if 'num_responses' not in st.session_state:
-        st.session_state.num_responses = 1
-    col_add = st.columns([1,1])
+        st.session_state.num_responses = 3
+    
+    col_add = st.columns([1,1,2])
     if col_add[0].button("+ Add Response"):
         st.session_state.num_responses += 1
     if col_add[1].button("- Remove Last"):
         st.session_state.num_responses = max(1, st.session_state.num_responses - 1)
+    if col_add[2].button("Reset to 3 Responses"):
+        st.session_state.num_responses = 3
 
     specs = []
     for i in range(st.session_state.num_responses):
-        with st.expander(f"Response {i+1}", expanded=True):
-            name = st.text_input(f"Name", f"Response {i+1}", key=f"name_{i}")
-            goal = st.selectbox(f"Goal", ["maximize", "minimize", "target"], key=f"goal_{i}")
-            low = st.number_input(f"Low (L)", value=0.0, key=f"low_{i}")
-            high = st.number_input(f"High (U)", value=100.0, key=f"high_{i}")
-            target = st.number_input(f"Target (T)", value=50.0, key=f"target_{i}")
+        with st.expander(f"Response {i+1}", expanded=(i<3)):
+            default_name = ["Yield (%)", "Impurity (ppm)", "Viscosity (cP)"][i] if i < 3 else f"Response {i+1}"
+            default_goal = ["maximize", "minimize", "target"][i] if i < 3 else "maximize"
+            default_low = [65, 5, 30][i] if i < 3 else 0.0
+            default_high = [95, 60, 70][i] if i < 3 else 100.0
+            default_target = [95, 5, 50][i] if i < 3 else 50.0
+            
+            name = st.text_input(f"Name", default_name, key=f"name_{i}")
+            goal = st.selectbox(f"Goal", ["maximize", "minimize", "target"], 
+                               index=["maximize","minimize","target"].index(default_goal), key=f"goal_{i}")
+            low = st.number_input(f"Low (L)", value=default_low, key=f"low_{i}")
+            high = st.number_input(f"High (U)", value=default_high, key=f"high_{i}")
+            target = st.number_input(f"Target (T)", value=default_target, key=f"target_{i}")
             weight = st.number_input(f"Weight", value=1.0, step=0.1, key=f"weight_{i}")
             shape = st.number_input(f"Shape (s)", value=1.0, step=0.1, key=f"shape_{i}")
             specs.append({
@@ -319,69 +329,125 @@ elif method == "Desirability Function":
             })
 
     st.subheader("Response Data")
-    st.markdown("Enter responses for each run (same order as CCD design).")
+    st.markdown("Enter responses for each run (same order as CCD design). One line per response, values comma-separated.")
     default_data = """72,83,77,89,68,87,75,82,91,90,92
 45,30,50,22,55,18,40,35,12,14,11
 35,55,30,62,28,65,40,48,52,50,51"""
     data_lines = st.text_area("Responses (one line per response, comma separated)", default_data, height=200)
-    response_data = [list(map(float, line.split(","))) for line in data_lines.strip().split("\n")]
+    
+    # Parse response data
+    response_data = []
+    for line in data_lines.strip().split("\n"):
+        if line.strip():
+            response_data.append(list(map(float, line.split(","))))
+    
+    # Check if number of lines matches number of responses
     if len(response_data) != st.session_state.num_responses:
-        st.error(f"Number of response lines ({len(response_data)}) does not match number of responses ({st.session_state.num_responses}). Please adjust.")
+        st.error(f"Number of response lines ({len(response_data)}) does not match number of responses ({st.session_state.num_responses}). Please adjust the number of responses or the data.")
     else:
+        # Ensure all response lines have the same length (should be 11 for CCD)
+        expected_len = len(X_coded)
+        for i, resp in enumerate(response_data):
+            if len(resp) != expected_len:
+                st.error(f"Response {i+1} has {len(resp)} values, but expected {expected_len} (matching design matrix).")
+                st.stop()
+        
         all_responses = np.array(response_data).T  # each column is a response
-        if st.button("Run Desirability Optimization"):
-            poly = PolynomialFeatures(degree=2, include_bias=True)
-            X_full = poly.fit_transform(X_coded)
-            models = []
-            for i in range(st.session_state.num_responses):
-                ols = sm.OLS(all_responses[:, i], X_full).fit()
-                models.append(ols)
-                st.write(f"Model for {specs[i]['name']}: R² = {ols.rsquared:.4f}")
-            # Optimize
-            bounds_3 = [(-alpha, alpha), (-alpha, alpha)]
-            result = differential_evolution(
-                lambda x: -overall_desirability(x, models, specs),
-                bounds=bounds_3, seed=42, maxiter=1000
-            )
-            opt_x = result.x
-            opt_D = -result.fun
-            center_2 = (np.array(natural_low) + np.array(natural_high))/2
-            half_2 = (np.array(natural_high) - np.array(natural_low))/2
-            opt_nat = center_2 + opt_x * half_2
-            st.subheader("Optimal Solution")
-            st.write(f"Coded optimum: x1={opt_x[0]:.4f}, x2={opt_x[1]:.4f}")
-            st.write(f"Natural optimum: {factor_names[0]}={opt_nat[0]:.3f}, {factor_names[1]}={opt_nat[1]:.4f}")
-            st.write(f"Overall Desirability D = {opt_D:.4f}")
-            st.write("Individual responses at optimum:")
-            x_opt_poly = poly.transform(opt_x.reshape(1,-1))
-            for i, model in enumerate(models):
-                y_pred = model.predict(x_opt_poly)[0]
-                d_i = individual_desirability(y_pred, specs[i])
-                st.write(f"{specs[i]['name']}: ŷ = {y_pred:.3f}  →  d = {d_i:.4f}")
-            # Desirability surface plot
-            def predict_desirability(X):
-                return np.array([overall_desirability(x, models, specs) for x in X])
-            fig = plot_rsm_surface(predict_desirability,
-                                   x1_range=(-alpha,alpha), x2_range=(-alpha,alpha),
-                                   x1_label=factor_names[0]+' (coded)',
-                                   x2_label=factor_names[1]+' (coded)',
-                                   y_label='Desirability D',
-                                   title='Overall Desirability',
-                                   optimum={'x1': opt_x[0], 'x2': opt_x[1], 'y': opt_D})
-            st.pyplot(fig)
-            # Bar chart
-            fig2, ax = plt.subplots(figsize=(8,4))
-            names = [s['name'] for s in specs] + ['Overall D']
-            d_vals = [individual_desirability(models[i].predict(x_opt_poly)[0], specs[i]) for i in range(len(specs))] + [opt_D]
-            bars = ax.barh(names, d_vals, color=['#4C72B0']*len(specs)+['#8172B2'], edgecolor='k', height=0.5)
-            ax.set_xlim(0,1.05)
-            ax.set_xlabel('Desirability')
-            ax.set_title('Individual & Overall Desirabilities')
-            for bar, val in zip(bars, d_vals):
-                ax.text(val+0.02, bar.get_y()+bar.get_height()/2, f'{val:.3f}', va='center')
-            plt.tight_layout()
-            st.pyplot(fig2)
+        
+# Inside Desirability Function, after fitting models, replace the optimization block with:
 
+if st.button("Run Desirability Optimization"):
+    poly = PolynomialFeatures(degree=2, include_bias=True)
+    X_full = poly.fit_transform(X_coded)
+    models = []
+    for i in range(st.session_state.num_responses):
+        ols = sm.OLS(all_responses[:, i], X_full).fit()
+        models.append(ols)
+        st.write(f"Model for {specs[i]['name']}: R² = {ols.rsquared:.4f}")
+    
+    # Bounds for optimization
+    bounds_3 = [(-alpha, alpha), (-alpha, alpha)]
+    
+    # Robust desirability function with error handling
+    def safe_overall_desirability(x, models, specs, poly):
+        try:
+            x_arr = np.array(x).reshape(1, -1)
+            x_poly = poly.transform(x_arr)
+            D = 1.0
+            total_w = sum(s['weight'] for s in specs)
+            for model, spec in zip(models, specs):
+                y_pred = model.predict(x_poly)[0]
+                d = individual_desirability(y_pred, spec)
+                # Avoid zero or negative values that break geometric mean
+                d = max(d, 1e-6)
+                D *= d ** (spec['weight'] / total_w)
+            return float(D)
+        except Exception as e:
+            return 0.0  # Return very low desirability for invalid points
+    
+    # Optimize
+    result = differential_evolution(
+        lambda x: -safe_overall_desirability(x, models, specs, poly),
+        bounds=bounds_3,
+        seed=42,
+        maxiter=500,
+        popsize=15,
+        disp=False
+    )
+    
+    if result.success:
+        opt_x = result.x
+        opt_D = -result.fun
+    else:
+        st.error("Optimization failed to converge. Try different initial bounds or increase maxiter.")
+        opt_x = result.x  # Still use the best found
+        opt_D = -result.fun
+    
+    # Compute natural optimum
+    center_2 = (np.array(natural_low) + np.array(natural_high))/2
+    half_2 = (np.array(natural_high) - np.array(natural_low))/2
+    opt_nat = center_2 + opt_x * half_2
+    
+    st.subheader("Optimal Solution")
+    st.write(f"Coded optimum: x1={opt_x[0]:.4f}, x2={opt_x[1]:.4f}")
+    st.write(f"Natural optimum: {factor_names[0]}={opt_nat[0]:.3f}, {factor_names[1]}={opt_nat[1]:.4f}")
+    st.write(f"Overall Desirability D = {opt_D:.4f}")
+    
+    # Individual responses at optimum
+    x_opt_poly = poly.transform(opt_x.reshape(1,-1))
+    st.write("Individual responses at optimum:")
+    for i, model in enumerate(models):
+        y_pred = model.predict(x_opt_poly)[0]
+        d_i = individual_desirability(y_pred, specs[i])
+        st.write(f"{specs[i]['name']}: ŷ = {y_pred:.3f}  →  d = {d_i:.4f}")
+    
+    # Desirability surface plot
+    def predict_desirability(X):
+        return np.array([safe_overall_desirability(x, models, specs, poly) for x in X])
+    
+    fig = plot_rsm_surface(predict_desirability,
+                           x1_range=(-alpha,alpha), x2_range=(-alpha,alpha),
+                           x1_label=factor_names[0]+' (coded)',
+                           x2_label=factor_names[1]+' (coded)',
+                           y_label='Desirability D',
+                           title='Overall Desirability',
+                           optimum={'x1': opt_x[0], 'x2': opt_x[1], 'y': opt_D})
+    st.pyplot(fig)
+    
+    # Bar chart
+    fig2, ax = plt.subplots(figsize=(8,4))
+    names = [s['name'] for s in specs] + ['Overall D']
+    d_vals = [individual_desirability(models[i].predict(x_opt_poly)[0], specs[i]) for i in range(len(specs))] + [opt_D]
+    colors = ['#4C72B0'] * len(specs) + ['#8172B2']
+    bars = ax.barh(names, d_vals, color=colors, edgecolor='k', height=0.5)
+    ax.set_xlim(0, 1.05)
+    ax.set_xlabel('Desirability')
+    ax.set_title('Individual & Overall Desirabilities')
+    for bar, val in zip(bars, d_vals):
+        ax.text(val + 0.02, bar.get_y() + bar.get_height()/2, f'{val:.3f}', va='center')
+    plt.tight_layout()
+    st.pyplot(fig2)
+    
 # ---------- Non-Linear RSM ----------
 elif method == "Non-Linear RSM":
     st.header("Non-Linear RSM (Gaussian Process / RBF)")
